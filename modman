@@ -41,7 +41,7 @@ Global Commands:
   [--force]          overwrite existing files, ignore untrusted cert warnings
 
 Module Commands:
-  $script <command> <module> [--force] [--basedir <path>] [<SCM options>]
+  $script <command> <module> [--force] [--basedir <path>] [--external-source] [<SCM options>]
 ------------------------------
   checkout <src>     checkout a new modman compatible module using subversion
   clone <src>        checkout a new modman compatible module using git clone
@@ -50,6 +50,9 @@ Module Commands:
   deploy --copy      deploy with hardlinks instead of symlinks (not recommended)
   [--force]          overwrite existing files/uncommitted changes and ignore untrusted cert warnings
   [--basedir <path>] on checkout/clone, specifies a base for module deployment
+  [--external-source] on clone, a local Git repository external to the modman
+                      directory is used as the source for creating links, rather 
+                      than checking out into the modman directory
   [<SCM options>]    specify additional parameters to SCM checkout/clone
 "
 tutorial="\
@@ -185,8 +188,12 @@ require_wc ()
   if ! [ -d "$mm/$1" ]; then
     echo_b "ERROR: $1 has not been checked out."; return 1
   fi
-  if ! [ -r "$mm/$1/modman" ]; then
-    echo_b "ERROR: $1 does not contain a \"modman\" module description file."; return 1
+  
+  # Allow a different source directory to be specified, to use as the source repository
+  local newsource=$(get_sourcedir "$mm/$1")
+  
+  if ! [ -r "$mm/$1/modman" ] && ! [ -r "$newsource/modman" ]; then
+    echo_b "ERROR: $1 does not contain a \"modman\" module description file, and no external source \"modman\" file found either."; return 1
   fi
   return 0
 }
@@ -242,17 +249,75 @@ set_basedir ()
   return 0
 }
 
+###############################################################
+# Reads the source directory for a module
+# Return value is blank, or an absolute path ending with /
+get_sourcedir ()
+{
+  local module_dir=$1
+  local sourcedir=''
+  if [ -r "$module_dir/.sourcedir" ]; then
+    sourcedir=$(cat "$module_dir/.sourcedir" | grep -v '^#')
+    if [ -n "$sourcedir" ]; then
+      sourcedir=${sourcedir%%/}/
+    fi
+  fi
+  echo -n "$sourcedir"
+}
+
+###############################################################
+# Writes a file, setting the source directory for a module
+set_sourcedir ()
+{
+  local module_dir=$1
+  local sourcedir=${2%%/}
+  if ! [ -d "$module_dir" ]; then
+    if ! mkdir $module_dir ; then
+      echo "Could not create module directory"
+      exit 1
+    fi
+  fi
+  if [ -n "$sourcedir" ]; then
+    echo -e "# This file was created by modman. Module source directory:\n$sourcedir" \
+      > "$module_dir/.sourcedir"
+    if ! [ $? ]; then
+      echo "ERROR: Could not write to file: $module_dir/.sourcedir."
+      return 1
+    fi
+  fi
+  return 0
+}
+
 ################################################################################
 # Reads a modman file and does the following:
 #   Creates the symlinks as described
 #   Imports external modman files (@import)
 #   Runs shell commands (@shell)
+# @param module path to the modman file
+# @param optional relative path, used for submodules, or something
 create_links ()
 {
   local module=$1
-  local module_dir=$(dirname "$module")
-  local basedir=$(get_basedir "$module_dir")
-  local relpath=${module:$((${#mmroot}+1))}
+  
+  if ! [ ${module:${#module}-6} = "modman" ] && ! [ ${module:${#module}-12} = "modman.local" ] && [ -r "$module/modman" ]; then
+    # module directory passed in, but modman file exists, so this is regular mode
+    module=$module/modman
+  fi
+  
+  if [ ${module:${#module}-6} = "modman" ] || [ ${module:${#module}-12} = "modman.local" ]; then
+    # regular mode
+    local module_dir=$(dirname "$module")
+    local srcdir=$module_dir
+    local basedir=$(get_basedir "$module_dir")
+    local relpath=${module:$((${#mmroot}+1))}
+  else
+    # external source mode
+    local module_dir=$module
+    local srcdir=$(get_sourcedir "$module_dir")
+    local basedir=$(get_basedir "$module_dir")
+    module=$srcdir/modman
+    local relpath=${module:$((${#mmroot}+1))}
+  fi
 
   # Use argument if module doesn't have a .basedir file
   if [ -z "$basedir" ]; then
@@ -321,7 +386,7 @@ create_links ()
     fi
 
     # Create symlink to target
-    src=$module_dir/$target
+    src=$srcdir/$target
     dest=$root/${basedir}${real%/}
 
     # Handle globbing (extended globbing enabled)
@@ -602,7 +667,7 @@ fi
 # Handle all other module-specific commands
 #############################################
 
-REGEX_ACTION='(update|checkout|clone|deploy|\s+)'
+REGEX_ACTION='(update|checkout|clone|deploy)'
 
 # Action is first argument, but should be supported as second for backwards compatibility
 action=''
@@ -689,19 +754,38 @@ case "$action" in
       fi
     fi
     success=0
-    if [ "$action" = "checkout" ]; then
-      svn checkout $@ "$module" && success=1
+    external_source=0
+    if [ "$1" = "--external-source" ] && [ "$action" = "clone" ]; then
+      # external source mode, we'll be referencing a git repository outside of the modman directory
+      external_source=1
+      shift; sourcedir="$1"; shift
+      if ! [ -d "$sourcedir" ]; then
+        echo "Source directory '$sourcedir' does not exist"; exit 1
+      fi
+      if ! [ -d "$sourcedir/.git" ]; then
+        echo "Source directory '$sourcedir' does not appear to be a local git repository"; exit 1
+      fi
+      set_sourcedir "$wc_dir" $sourcedir && success=1
     else
-      git clone --recursive $@ "$module" && success=1
+      # regular mode
+      if [ "$action" = "checkout" ]; then
+        svn checkout $@ "$module" && success=1
+      else
+        git clone --recursive $@ "$module" && success=1
+      fi
     fi
 
     if
       [ $success -eq 1 ] &&
       require_wc "$module" && cd "$wc_dir" &&
       set_basedir "$wc_dir" "$basedir" &&
-      create_links "$wc_desc"
+      create_links "$wc_dir"
     then
-      echo "Checkout of $module complete"
+      if [ $external_source -eq 1 ]; then
+        echo "Setup of $module complete"
+      else
+        echo "Checkout of $module complete"
+      fi
     else
       if [ -d "$wc_dir" ]; then rm -rf "$wc_dir"; fi
       echo "Error checking out $module, operation cancelled."
@@ -714,7 +798,8 @@ case "$action" in
     if [ "$1" = "--copy" ]; then
       copy_over "$wc_desc" && echo "$module has been deployed under $root with --copy enabled"
     else
-      create_links "$wc_desc" && echo "$module has been deployed under $root"
+      create_links "$wc_dir" && echo "$module has been deployed under $root"
+      
       if [ -r "$wc_desc.local" ]; then
         create_links "$wc_desc.local" && echo "Applied local modman file for $module"
       fi
