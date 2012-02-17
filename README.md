@@ -15,7 +15,7 @@ Requirements
 Installation
 ------------
 
-* Download or checkout
+* [Download](https://github.com/foxrunsoftware/modman/downloads) or checkout
 * Move to or create link in your path 
 
 Getting Started
