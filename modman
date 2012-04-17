@@ -765,9 +765,6 @@ case "$action" in
       if ! [ -d "$sourcedir" ]; then
         echo "Source directory '$sourcedir' does not exist"; exit 1
       fi
-      if ! [ -d "$sourcedir/.git" ]; then
-        echo "Source directory '$sourcedir' does not appear to be a local git repository"; exit 1
-      fi
       set_sourcedir "$wc_dir" $sourcedir && success=1
     else
       # regular mode
